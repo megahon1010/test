@@ -1,6 +1,8 @@
 // main.ts - Deno Deploy/TypeScript版 Bot
 
-import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
+// serveのインポートを削除し、Deno標準のDeno.serveに移行します
+// import { serve } from "https://deno.land/std@0.200.0/http/server.ts"; // ❌ 削除
+
 import { 
     CURRENCY_EMOJI, 
     COOLDOWN_SECONDS, 
@@ -328,8 +330,16 @@ async function handleSetJob(interaction: any) {
 
 /**
  * Discordからのすべてのリクエストを処理するメインハンドラ関数
+ * @param request incoming Request object
+ * @returns Response object
  */
 async function handleDiscordRequest(request: Request): Promise<Response> {
+    // ヘルスチェックやその他のリクエストへの応答
+    if (request.url.includes("/health")) {
+        // Deno Deployのヘルスチェックリクエストに応答
+        return new Response("OK", { status: 200 });
+    }
+
     // 1. 署名検証 (Security)
     const signature = request.headers.get("X-Signature-Ed25519");
     const timestamp = request.headers.get("X-Signature-Timestamp");
@@ -337,6 +347,7 @@ async function handleDiscordRequest(request: Request): Promise<Response> {
 
     if (!PUBLIC_KEY || !signature || !timestamp) {
         console.error("Missing Security Headers or Public Key");
+        // Discordからのリクエストではないか、不正なリクエストとして扱う
         return new Response("Bad Request", { status: 400 });
     }
 
@@ -416,8 +427,10 @@ function hexToUint8(hex: string): Uint8Array {
     return new Uint8Array(hex.match(/.{1,2}/g)!.map(val => parseInt(val, 16)));
 }
 
-// --- Deno Deploy サーバー起動 ---
+// --- Deno Deploy サーバー起動 (Deno.serveに修正) ---
+
 console.log("Deno Deploy Discord Bot Worker Starting...");
 
-// Deno Deployは `serve` 関数にリクエストハンドラを渡すことで動作します
-serve(handleDiscordRequest);
+// Deno Deployが外部リクエストを待ち受けるために、Deno.serveを使用します。
+// これにより、ウォームアップリクエストやDiscordからのInteractionリクエストに応答できます。
+Deno.serve(handleDiscordRequest);
