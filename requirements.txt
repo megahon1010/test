@@ -1,0 +1,3 @@
+discord.py
+# ボイス機能を使うなら PyNaCl も追加
+# PyNaCl
