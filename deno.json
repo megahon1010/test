@@ -1,8 +1,9 @@
 {
-  "imports": {
-    "https://deno.land/std@0.200.0/http/server.ts": "https://deno.land/std@0.200.0/http/server.ts"
-  },
   "tasks": {
     "start": "deno run --allow-env --allow-net main.ts"
+  },
+  "imports": {
+    "../firestore_api.ts": "./firestore_api.ts",
+    "../economy_config.ts": "./economy_config.ts"
   }
 }
