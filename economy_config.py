@@ -10,7 +10,7 @@ CURRENCY_EMOJI = '💎'
 DATA_FILE = 'users.json' 
 
 # クールダウン時間 (秒) - 1時間に設定
-COOLDOWN_SECONDS = 3600
+COOLDOWN_SECONDS = 10
 
 # ----------------------------------------------------
 # 職業階層データ定義 (昇進システム)
@@ -19,10 +19,10 @@ COOLDOWN_SECONDS = 3600
 # 形式: { 'name': '職業名', 'pay': (下限, 上限), 'required_works': 昇進に必要なwork回数, 'emoji': 絵文字 }
 JOB_HIERARCHY = [
     {
-        'name': '空白の職業 ❓',
+        'name': '不登校 🏫',
         'pay': (10, 30),
         'required_works': 0, # 初期職業
-        'emoji': '❓'
+        'emoji': '🏫'
     },
     {
         'name': '鉱夫 ⛏️',
@@ -39,7 +39,7 @@ JOB_HIERARCHY = [
     {
         'name': 'IT企業社長 💻',
         'pay': (180, 250),
-        'required_works': 50, # 50回で最高職 (これ以上の昇進なし)
+        'required_works': 50, # 100回で最高職 (これ以上の昇進なし)
         'emoji': '💻'
     }
 ]
