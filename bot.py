@@ -125,6 +125,15 @@ if __name__ == "__main__":
     t.start()
     
     # トークンを設定してボットを起動
-    bot.run('DISCORD_TOKEN')
+    # 修正後: os.environ.get() を使って環境変数から値を取得
+    TOKEN = os.environ.get('DISCORD_TOKEN')
+    
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        # トークンが取得できない場合はログに出力
+        print("Error: DISCORD_TOKEN 環境変数が取得できませんでした。Koyebの設定を確認してください。")
+    
     pass
+
 
