@@ -1,7 +1,5 @@
-# Discord Bot - Firestore永続化版 (データリセット対策 & Koyeb Deep Sleep対策)
+# Discord Bot - FastAPI対応版 (データ永続化 & Koyeb Deep Sleep対策)
 
-from flask import Flask
-from threading import Thread
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -11,57 +9,42 @@ import aiohttp
 import json
 import os
 import logging
+
+# 🚨 FastAPIとUvicorn関連のインポート
+from fastapi import FastAPI
+import uvicorn
+from contextlib import asynccontextmanager
+import asyncio # 非同期処理のための標準ライブラリ
+
 # 🚨 Firebase関連のインポート
 import firebase_admin 
 from firebase_admin import credentials, firestore
-
-# ロギング設定
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 🚨 設定ファイルをインポート
 try:
     from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS
 except ImportError:
     logging.error("Error: economy_config.py not found. Please ensure it is in the same directory.")
-    # 本番環境ではexit(1)として強制終了させるべきですが、ここでは続行可能にします
-    pass 
+    exit(1)
 
-# --- Flask Webサーバー設定 (Koyebのヘルスチェック応答用) ---
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    # Discord Bot is running and pingable!
-    return "Discord Bot is running and pingable!", 200
-
-def run_flask():
-    # 警告は出ますが、Koyebの動作に必須なのでこのままにします
-    app.run(host='0.0.0.0', port=8000, debug=False)
-
-# --- Discord Bot設定 ---
-intents = discord.Intents.default()
-intents.message_content = True 
-intents.members = True 
-intents.voice_states = True
-
-bot = commands.Bot(command_prefix='!', intents=intents)
+# ロギング設定
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # グローバル変数
 http_session = None
 db = None # Firestoreクライアント
+bot = None # Discord Botのインスタンス
 
 # --- Firestore初期化 ---
 def init_firestore():
     """Firestore接続を初期化し、成功したか(True)失敗したか(False)を返す"""
     global db
-    # 🚨 Koyebの環境変数から認証情報を取得
     firebase_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
     if not firebase_json_str:
         logging.error("FIREBASE_CREDENTIALS_JSON 環境変数が設定されていません。データは永続化されません。")
         return False
         
     try:
-        # JSON文字列を解析し、認証情報として使用
         cred_json = json.loads(firebase_json_str)
         cred = credentials.Certificate(cred_json)
         
@@ -75,21 +58,16 @@ def init_firestore():
         logging.error(f"Failed to initialize Firebase: {e}")
         return False
 
-# --- Firestore操作 ---
+# --- Firestore操作 (非同期処理は変更なし) ---
 async def get_player_data(user_id):
     """Firestoreからユーザーデータを取得し、存在しない場合は初期値を返す。"""
-    if db is None:
-        return None # DB接続失敗
+    if db is None: return None
     try:
-        # 'users' コレクションのユーザーIDドキュメントを参照
         doc_ref = db.collection('users').document(str(user_id))
-        # 同期処理を非同期で実行
         doc = await bot.loop.run_in_executor(None, doc_ref.get) 
-        
         if doc.exists:
             return doc.to_dict()
         else:
-            # データがない場合は初期値を返す
             return {
                 'gem_balance': 0, 
                 'work_count': 0, 
@@ -102,11 +80,9 @@ async def get_player_data(user_id):
 
 async def set_player_data(user_id, data):
     """ユーザーデータをFirestoreに保存する。"""
-    if db is None:
-        return False
+    if db is None: return False
     try:
         doc_ref = db.collection('users').document(str(user_id))
-        # 同期処理を非同期で実行
         await bot.loop.run_in_executor(None, lambda: doc_ref.set(data)) 
         return True
     except Exception as e:
@@ -114,15 +90,84 @@ async def set_player_data(user_id, data):
         return False
 
 
-# --- スリープ回避のためのタスク ---
+# --- Discord Botクラス定義 ---
+class MyBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # コマンドをボットに直接追加
+        self.tree.add_command(work_command)
+        self.tree.add_command(balance_command)
+        self.tree.add_command(ping_command)
+        self.tree.add_command(setjob_command)
+
+    async def on_ready(self):
+        # Firestoreの初期化を試行
+        if not init_firestore():
+            print("WARNING: Firestoreの初期化に失敗しました。データはリセットされます。")
+
+        print(f'Logged in as {self.user}')
+        try:
+            synced = await self.tree.sync()
+            print(f"Synced {len(synced)} command(s)")
+        except Exception as e:
+            print(e)
+            
+        if not http_ping.is_running():
+            http_ping.start()
+            print("Anti-sleep HTTP ping task started.")
+            
+# --- FastAPIとDiscord Botの連携 ---
+
+# ライフサイクル管理のためのコンテキストマネージャ
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global bot
+    
+    # 起動時 (Startup)
+    logging.info("FastAPI Startup: Starting Discord Bot...")
+    
+    intents = discord.Intents.default()
+    intents.message_content = True 
+    intents.members = True 
+    intents.voice_states = True
+    
+    # Discord Botのインスタンスを作成
+    bot = MyBot(command_prefix='!', intents=intents)
+    
+    # Botを非同期タスクとして起動
+    TOKEN = os.environ.get('DISCORD_TOKEN')
+    if not TOKEN:
+        logging.error("Error: DISCORD_TOKEN 環境変数が設定されていません。")
+        exit(1)
+        
+    bot_task = asyncio.create_task(bot.start(TOKEN))
+    
+    # Botが完全にログインするまで待つ（on_readyまで）
+    await bot.wait_until_ready()
+    
+    yield # アプリケーション実行中
+
+    # 終了時 (Shutdown)
+    logging.info("FastAPI Shutdown: Stopping Discord Bot...")
+    if bot:
+        await bot.close()
+    if http_session:
+        await http_session.close()
+
+# FastAPIアプリの作成
+fastapi_app = FastAPI(lifespan=lifespan)
+
+# --- Koyebのヘルスチェックエンドポイント ---
+@fastapi_app.get("/")
+async def root():
+    return {"message": "Discord Bot is running and pingable via FastAPI!"}
+
+# --- スリープ回避のためのタスク (FastAPIと連携) ---
 @tasks.loop(minutes=10)
 async def http_ping():
     global http_session
     # K_SERVICE_URLが設定されていない場合は内部Ping（警告は出ますが、これでOK）
     url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000") 
-    
-    if "127.0.0.1" in url:
-        logging.warning("K_SERVICE_URL環境変数が設定されていません。内部Ping (localhost:8000)を試みます。")
     
     if http_session is None:
         http_session = aiohttp.ClientSession()
@@ -136,32 +181,12 @@ async def http_ping():
     except Exception as e:
         logging.error(f"Self-ping error to {url}: {e.__class__.__name__}: {e}")
 
-
-# --- 起動処理とコマンド ---
-@bot.event
-async def on_ready():
-    # Firestoreの初期化を試行
-    if not init_firestore():
-        print("WARNING: Firestoreの初期化に失敗しました。データはリセットされます。")
-        
-    print(f'Logged in as {bot.user}')
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(e)
-        
-    if not http_ping.is_running():
-        http_ping.start()
-        print("Anti-sleep HTTP ping task started.")
-        
 # --- コマンド定義 ---
 
-@bot.tree.command(name='work', description='仕事をしてGemを稼ぎます (1時間に1回)')
+@app_commands.command(name='work', description='仕事をしてGemを稼ぎます (1時間に1回)')
 async def work_command(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     
-    # データをFirestoreから取得
     player = await get_player_data(user_id)
     if player is None:
         await interaction.response.send_message("エラー: データベースに接続できませんでした。FIREBASE_CREDENTIALS_JSONを確認してください。", ephemeral=True)
@@ -234,7 +259,7 @@ async def work_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name='balance', description='現在の所持金、職業、昇進状況を確認します')
+@app_commands.command(name='balance', description='現在の所持金、職業、昇進状況を確認します')
 async def balance_command(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     
@@ -271,22 +296,20 @@ async def balance_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name='ping', description='Botの応答速度を確認します')
+@app_commands.command(name='ping', description='Botの応答速度を確認します')
 async def ping_command(interaction: discord.Interaction):
-    # 応答速度を計算 (latencyはミリ秒単位)
+    # Botのレイテンシ (秒) からミリ秒に変換
     latency_ms = bot.latency * 1000
     
-    # 応答メッセージ
     embed = discord.Embed(
         title="🏓 Pong!",
         description=f"現在の応答速度: **{latency_ms:.2f}ms**",
         color=discord.Color.green()
     )
-    # ephemeral=Trueで、コマンドを使ったユーザーのみに表示
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name='setjob', description='(管理者用) ユーザーの職業を強制的に設定します。')
+@app_commands.command(name='setjob', description='(管理者用) ユーザーの職業を強制的に設定します。')
 @app_commands.describe(
     target_user='職業を変更したいユーザーを選択してください',
     job_index='設定したい職業のインデックス (0から開始, 0: 見習い, 4: 部長など)'
@@ -302,7 +325,6 @@ async def setjob_command(interaction: discord.Interaction, target_user: discord.
 
     user_id = str(target_user.id)
     
-    # データをFirestoreから取得
     player = await get_player_data(user_id)
     if player is None:
         await interaction.response.send_message("エラー: データベースに接続できませんでした。", ephemeral=True)
@@ -324,16 +346,9 @@ async def setjob_command(interaction: discord.Interaction, target_user: discord.
     )
 
 
+# --- 実行部分 ---
 if __name__ == "__main__":
-    
-    # サーバーを別スレッドで起動 (24時間稼働の維持)
-    t = Thread(target=run_flask)
-    t.start()
-    
-    # トークンを環境変数 'DISCORD_TOKEN' から安全に取得
-    TOKEN = os.environ.get('DISCORD_TOKEN')
-    
-    if TOKEN:
-        bot.run(TOKEN)
-    else:
-        logging.error("Error: DISCORD_TOKEN 環境変数が設定されていません。")
+    # Koyebはデフォルトでポート8000を使用します
+    PORT = int(os.environ.get("PORT", 8000))
+    # Uvicornを使ってFastAPIアプリケーションを起動
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT)
