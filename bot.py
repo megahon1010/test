@@ -1,12 +1,12 @@
 # Easy Discord Bot Builderによって作成されました！ 製作：@himais0giiiin
 # Created with Easy Discord Bot Builder! created by @himais0giiiin!
-# Optimized Version for Koyeb Deployment (Advanced Economic System)
+# Optimized Version for Koyeb Deployment (Advanced Economic System & Anti-Sleep)
 
 from flask import Flask
 from threading import Thread
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import ui
 import random
 import asyncio
@@ -16,19 +16,17 @@ import json
 import os
 import logging
 import time
+import requests # 👈 自己Pingのためにrequestsを追加
 
 # 🚨 新しい設定ファイルをインポート
-# このファイルには、職業階層、報酬、メッセージテンプレートが定義されています。
 try:
     from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS, DATA_FILE
 except ImportError:
-    # economy_config.pyが見つからない場合のフォールバック（デプロイ成功のため、設定は別ファイルに！）
     print("Error: economy_config.py not found. Please ensure it is in the same directory.")
     exit(1)
 
 
 # Flaskアプリの作成 (ヘルスチェック用)
-# Koyebからの定期的なアクセスに応答し、ボットの常時稼働を維持します。
 app = Flask(__name__)
 
 @app.route('/')
@@ -39,7 +37,6 @@ def index():
 # Flaskサーバーを別スレッドで起動する関数
 def run_flask():
     # Koyebは外部アクセスに8000番ポートを使用します。
-    # debug=Falseは本番環境のベストプラクティス
     app.run(host='0.0.0.0', port=8000, debug=False)
 
 # ロギング設定 (Logging Setup)
@@ -54,15 +51,7 @@ intents.voice_states = True
 # Botの作成 (コマンドプレフィックスは '!' )
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# グローバルエラーハンドラー
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    logging.error(f"Command Error: {error}")
-
 # ---JSON操作---
-# 永続的なデータ保存を想定した関数 (JSONファイルを使用)
 def _load_json_data(filename):
     if not os.path.exists(filename):
         return {}
@@ -80,23 +69,23 @@ def _save_json_data(filename, data):
     except Exception as e:
         logging.error(f"JSON Save Error: {e}")
 
-# --- モーダルクラス (今回は未使用) ---
-class EasyModal(discord.ui.Modal):
-    def __init__(self, title, custom_id, inputs):
-        super().__init__(title=title, timeout=None, custom_id=custom_id)
-        for item in inputs:
-            self.add_item(discord.ui.TextInput(label=item['label'], custom_id=item['id']))
-
-# --- インタラクションハンドラー (今回は未使用) ---
-@bot.event
-async def on_interaction(interaction):
+# --- スリープ回避のためのタスク ---
+@tasks.loop(minutes=10) # 10分ごとに実行
+async def http_ping():
+    # KoyebのデプロイメントURLを取得します。Koyeb環境では自動で設定されます。
+    # 失敗した場合は localhost:8000 を試みます。
+    url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000")
+    
     try:
-        if interaction.type == discord.InteractionType.component:
-            pass
-        elif interaction.type == discord.InteractionType.modal_submit:
-            pass
-    except Exception as e:
-        print(f"Interaction Error: {e}")
+        # タイムアウトを設定し、ボットの動作を邪魔しないようにします
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            logging.info(f"Self-ping successful. Status: {response.status_code}")
+        else:
+            logging.warning(f"Self-ping failed. Status: {response.status_code}")
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Self-ping error: {e}")
 
 # ----------------------------
 
@@ -110,18 +99,15 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(e)
-
-    # 以前のエラー回避のため、起動時メッセージ送信コードはコメントアウトのまま
-    # _ch_id = int('1252397083999076364') if str('1252397083999076364').isdigit() else 0
-    # _channel = bot.get_channel(_ch_id)
-    # if _channel:
-    #     await _channel.send(content='フリーナは神ではない(物理)')
+        
+    # 🚨 ここでスリープ回避タスクを開始します
+    if not http_ping.is_running():
+        http_ping.start()
+        print("Anti-sleep HTTP ping task started.")
 
 
 @bot.command(name='ping')
 async def ping_cmd(ctx):
-    user = ctx.author
-
     if 'ctx' in locals():
         if isinstance(ctx, discord.Interaction):
             if ctx.response.is_done():
@@ -284,6 +270,7 @@ async def leaderboard_command(interaction: discord.Interaction):
     leaderboard = []
     for user_id, user_data in data.items():
         try:
+            # ユーザーIDからdiscord.Memberオブジェクトを取得
             user = bot.get_user(int(user_id))
             if user:
                 leaderboard.append({
@@ -308,9 +295,11 @@ async def leaderboard_command(interaction: discord.Interaction):
         rank_text = []
         for i, entry in enumerate(leaderboard[:10]):
             job_name = JOB_HIERARCHY[entry['job_index']]['name']
+            # 見やすくするために、3桁区切りのカンマを追加
+            balance_formatted = f"{entry['balance']:,}" 
             rank_text.append(
                 f"**#{i+1}** {entry['name']} ({job_name})\n"
-                f"└─ {CURRENCY_EMOJI} **{entry['balance']:,}**"
+                f"└─ {CURRENCY_EMOJI} **{balance_formatted}**"
             )
         embed.description = "\n".join(rank_text)
 
@@ -366,7 +355,7 @@ async def setjob_error(interaction: discord.Interaction, error: app_commands.App
 # --------------------------
 
 if __name__ == "__main__":
-    from threading import Thread # スレッドをインポート (念のため)
+    from threading import Thread
     
     # サーバーを別スレッドで起動 (24時間稼働の維持)
     t = Thread(target=run_flask)
