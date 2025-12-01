@@ -23,13 +23,15 @@ try:
     from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS
 except ImportError:
     logging.error("Error: economy_config.py not found. Please ensure it is in the same directory.")
-    exit(1)
+    # 本番環境ではexit(1)として強制終了させるべきですが、ここでは続行可能にします
+    pass 
 
 # --- Flask Webサーバー設定 (Koyebのヘルスチェック応答用) ---
 app = Flask(__name__)
 
 @app.route('/')
 def index():
+    # Discord Bot is running and pingable!
     return "Discord Bot is running and pingable!", 200
 
 def run_flask():
@@ -50,6 +52,7 @@ db = None # Firestoreクライアント
 
 # --- Firestore初期化 ---
 def init_firestore():
+    """Firestore接続を初期化し、成功したか(True)失敗したか(False)を返す"""
     global db
     # 🚨 Koyebの環境変数から認証情報を取得
     firebase_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
@@ -59,7 +62,6 @@ def init_firestore():
         
     try:
         # JSON文字列を解析し、認証情報として使用
-        # Koyebで設定する環境変数の値は、JSONファイルの中身をそのままコピーしてください。
         cred_json = json.loads(firebase_json_str)
         cred = credentials.Certificate(cred_json)
         
@@ -74,7 +76,6 @@ def init_firestore():
         return False
 
 # --- Firestore操作 ---
-# ユーザーデータをFirestoreから取得
 async def get_player_data(user_id):
     """Firestoreからユーザーデータを取得し、存在しない場合は初期値を返す。"""
     if db is None:
@@ -82,12 +83,13 @@ async def get_player_data(user_id):
     try:
         # 'users' コレクションのユーザーIDドキュメントを参照
         doc_ref = db.collection('users').document(str(user_id))
-        doc = await bot.loop.run_in_executor(None, doc_ref.get) # 同期処理を非同期で実行
+        # 同期処理を非同期で実行
+        doc = await bot.loop.run_in_executor(None, doc_ref.get) 
         
         if doc.exists:
             return doc.to_dict()
         else:
-            # データがない場合は初期値を返す (Firestoreには書き込まない)
+            # データがない場合は初期値を返す
             return {
                 'gem_balance': 0, 
                 'work_count': 0, 
@@ -98,25 +100,25 @@ async def get_player_data(user_id):
         logging.error(f"Firestore Get Error for {user_id}: {e}")
         return None
 
-# ユーザーデータをFirestoreに保存
 async def set_player_data(user_id, data):
     """ユーザーデータをFirestoreに保存する。"""
     if db is None:
         return False
     try:
         doc_ref = db.collection('users').document(str(user_id))
-        await bot.loop.run_in_executor(None, lambda: doc_ref.set(data)) # 同期処理を非同期で実行
+        # 同期処理を非同期で実行
+        await bot.loop.run_in_executor(None, lambda: doc_ref.set(data)) 
         return True
     except Exception as e:
         logging.error(f"Firestore Set Error for {user_id}: {e}")
         return False
 
 
-# --- スリープ回避のためのタスク (変更なし) ---
+# --- スリープ回避のためのタスク ---
 @tasks.loop(minutes=10)
 async def http_ping():
     global http_session
-    # K_SERVICE_URLが設定されていない場合は内部Ping（警告は出ます）
+    # K_SERVICE_URLが設定されていない場合は内部Ping（警告は出ますが、これでOK）
     url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000") 
     
     if "127.0.0.1" in url:
@@ -132,7 +134,6 @@ async def http_ping():
             else:
                 logging.warning(f"Self-ping failed to {url}. Status: {response.status}")
     except Exception as e:
-        # ネットワークエラーやDNSエラーなど
         logging.error(f"Self-ping error to {url}: {e.__class__.__name__}: {e}")
 
 
@@ -141,7 +142,6 @@ async def http_ping():
 async def on_ready():
     # Firestoreの初期化を試行
     if not init_firestore():
-        # Firestore初期化に失敗してもBotは起動させるが、データは永続化されない
         print("WARNING: Firestoreの初期化に失敗しました。データはリセットされます。")
         
     print(f'Logged in as {bot.user}')
@@ -155,6 +155,7 @@ async def on_ready():
         http_ping.start()
         print("Anti-sleep HTTP ping task started.")
         
+# --- コマンド定義 ---
 
 @bot.tree.command(name='work', description='仕事をしてGemを稼ぎます (1時間に1回)')
 async def work_command(interaction: discord.Interaction):
@@ -269,8 +270,61 @@ async def balance_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
+
+@bot.tree.command(name='ping', description='Botの応答速度を確認します')
+async def ping_command(interaction: discord.Interaction):
+    # 応答速度を計算 (latencyはミリ秒単位)
+    latency_ms = bot.latency * 1000
+    
+    # 応答メッセージ
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"現在の応答速度: **{latency_ms:.2f}ms**",
+        color=discord.Color.green()
+    )
+    # ephemeral=Trueで、コマンドを使ったユーザーのみに表示
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name='setjob', description='(管理者用) ユーザーの職業を強制的に設定します。')
+@app_commands.describe(
+    target_user='職業を変更したいユーザーを選択してください',
+    job_index='設定したい職業のインデックス (0から開始, 0: 見習い, 4: 部長など)'
+)
+async def setjob_command(interaction: discord.Interaction, target_user: discord.Member, job_index: int):
+    # 職業インデックスのバリデーション
+    if not (0 <= job_index < len(JOB_HIERARCHY)):
+        await interaction.response.send_message(
+            f"無効な職業インデックスです。0から{len(JOB_HIERARCHY) - 1}の範囲で指定してください。",
+            ephemeral=True
+        )
+        return
+
+    user_id = str(target_user.id)
+    
+    # データをFirestoreから取得
+    player = await get_player_data(user_id)
+    if player is None:
+        await interaction.response.send_message("エラー: データベースに接続できませんでした。", ephemeral=True)
+        return
+        
+    old_job = JOB_HIERARCHY[player['job_index']]['name']
+    new_job = JOB_HIERARCHY[job_index]['name']
+
+    # データの更新
+    player['job_index'] = job_index
+    
+    # データをFirestoreに保存
+    await set_player_data(user_id, player)
+
+    # 応答メッセージ
+    await interaction.response.send_message(
+        f"✅ {target_user.display_name} さんの職業を **{old_job}** から **{new_job} {JOB_HIERARCHY[job_index]['emoji']}** に変更しました。",
+        ephemeral=False
+    )
+
+
 if __name__ == "__main__":
-    from threading import Thread
     
     # サーバーを別スレッドで起動 (24時間稼働の維持)
     t = Thread(target=run_flask)
