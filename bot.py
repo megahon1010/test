@@ -9,18 +9,17 @@ import aiohttp
 import json
 import os
 import logging
+import asyncio 
 
-# 🚨 FastAPIとUvicorn関連のインポート
 from fastapi import FastAPI
 import uvicorn
 from contextlib import asynccontextmanager
-import asyncio # 非同期処理のための標準ライブラリ
 
-# 🚨 Firebase関連のインポート
+# Firebase関連のインポート
 import firebase_admin 
 from firebase_admin import credentials, firestore
 
-# 🚨 設定ファイルをインポート
+# 設定ファイルをインポート
 try:
     from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS
 except ImportError:
@@ -35,9 +34,9 @@ http_session = None
 db = None # Firestoreクライアント
 bot = None # Discord Botのインスタンス
 
-# --- Firestore初期化 ---
+# --- Firestore操作 (変更なし) ---
 def init_firestore():
-    """Firestore接続を初期化し、成功したか(True)失敗したか(False)を返す"""
+    # ... (既存のinit_firestore関数)
     global db
     firebase_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
     if not firebase_json_str:
@@ -58,9 +57,8 @@ def init_firestore():
         logging.error(f"Failed to initialize Firebase: {e}")
         return False
 
-# --- Firestore操作 (非同期処理は変更なし) ---
 async def get_player_data(user_id):
-    """Firestoreからユーザーデータを取得し、存在しない場合は初期値を返す。"""
+    # ... (既存のget_player_data関数)
     if db is None: return None
     try:
         doc_ref = db.collection('users').document(str(user_id))
@@ -79,7 +77,7 @@ async def get_player_data(user_id):
         return None
 
 async def set_player_data(user_id, data):
-    """ユーザーデータをFirestoreに保存する。"""
+    # ... (既存のset_player_data関数)
     if db is None: return False
     try:
         doc_ref = db.collection('users').document(str(user_id))
@@ -90,7 +88,27 @@ async def set_player_data(user_id, data):
         return False
 
 
-# --- Discord Botクラス定義 ---
+# --- スリープ回避のためのタスク (変更なし) ---
+@tasks.loop(minutes=10)
+async def http_ping():
+    # ... (既存のhttp_ping関数)
+    global http_session
+    url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000") 
+    
+    if http_session is None:
+        http_session = aiohttp.ClientSession()
+
+    try:
+        async with http_session.get(url, timeout=5) as response:
+            if response.status == 200:
+                logging.info(f"Self-ping successful to {url}. Status: {response.status}")
+            else:
+                logging.warning(f"Self-ping failed to {url}. Status: {response.status}")
+    except Exception as e:
+        logging.error(f"Self-ping error to {url}: {e.__class__.__name__}: {e}")
+
+
+# --- Discord Botクラス定義 (変更なし) ---
 class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -107,49 +125,53 @@ class MyBot(commands.Bot):
 
         print(f'Logged in as {self.user}')
         try:
-            synced = await self.tree.sync()
+            # Botインスタンスが準備できた後にコマンドを同期
+            synced = await self.tree.sync() 
             print(f"Synced {len(synced)} command(s)")
         except Exception as e:
-            print(e)
+            print(f"Command sync error: {e}")
             
+        # on_ready 内でpingタスクを開始
         if not http_ping.is_running():
             http_ping.start()
             print("Anti-sleep HTTP ping task started.")
             
-# --- FastAPIとDiscord Botの連携 ---
+# --- FastAPIとDiscord Botの連携 (wait_until_ready()を削除) ---
 
-# ライフサイクル管理のためのコンテキストマネージャ
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot
+    global bot, http_session
     
-    # 起動時 (Startup)
     logging.info("FastAPI Startup: Starting Discord Bot...")
     
+    # 1. Botのインスタンスを作成
     intents = discord.Intents.default()
     intents.message_content = True 
     intents.members = True 
     intents.voice_states = True
-    
-    # Discord Botのインスタンスを作成
     bot = MyBot(command_prefix='!', intents=intents)
     
-    # Botを非同期タスクとして起動
+    # 2. HTTPセッションの初期化
+    http_session = aiohttp.ClientSession()
+
+    # 3. Botを非同期タスクとして起動
     TOKEN = os.environ.get('DISCORD_TOKEN')
     if not TOKEN:
         logging.error("Error: DISCORD_TOKEN 環境変数が設定されていません。")
-        exit(1)
+        # トークンがない場合は起動せずにエラー終了
+        raise RuntimeError("Missing DISCORD_TOKEN environment variable.") 
         
-    bot_task = asyncio.create_task(bot.start(TOKEN))
+    # Botのstartメソッドを呼び出し、タスクとしてバックグラウンドで実行させる
+    asyncio.create_task(bot.start(TOKEN)) 
     
-    # Botが完全にログインするまで待つ（on_readyまで）
-    await bot.wait_until_ready()
+    # await bot.wait_until_ready() は削除！ Uvicornの複数ワーカーで問題を起こすため
     
-    yield # アプリケーション実行中
+    yield # アプリケーション実行中 (Botはバックグラウンドで実行中)
 
     # 終了時 (Shutdown)
-    logging.info("FastAPI Shutdown: Stopping Discord Bot...")
+    logging.info("FastAPI Shutdown: Stopping Discord Bot and closing sessions...")
     if bot:
+        # Botを安全にシャットダウン
         await bot.close()
     if http_session:
         await http_session.close()
@@ -157,34 +179,20 @@ async def lifespan(app: FastAPI):
 # FastAPIアプリの作成
 fastapi_app = FastAPI(lifespan=lifespan)
 
-# --- Koyebのヘルスチェックエンドポイント ---
+# --- Koyebのヘルスチェックエンドポイント (変更なし) ---
 @fastapi_app.get("/")
 async def root():
-    return {"message": "Discord Bot is running and pingable via FastAPI!"}
+    # Botが準備完了状態であれば、ヘルスチェックOKを返す
+    if bot and bot.is_ready():
+        return {"message": "Discord Bot and FastAPI are running!", "status": "Ready"}
+    else:
+        return {"message": "FastAPI is running, Bot is starting up...", "status": "Starting"}
 
-# --- スリープ回避のためのタスク (FastAPIと連携) ---
-@tasks.loop(minutes=10)
-async def http_ping():
-    global http_session
-    # K_SERVICE_URLが設定されていない場合は内部Ping（警告は出ますが、これでOK）
-    url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000") 
-    
-    if http_session is None:
-        http_session = aiohttp.ClientSession()
-
-    try:
-        async with http_session.get(url, timeout=5) as response:
-            if response.status == 200:
-                logging.info(f"Self-ping successful to {url}. Status: {response.status}")
-            else:
-                logging.warning(f"Self-ping failed to {url}. Status: {response.status}")
-    except Exception as e:
-        logging.error(f"Self-ping error to {url}: {e.__class__.__name__}: {e}")
-
-# --- コマンド定義 ---
+# --- コマンド定義 (work_command, balance_command, ping_command, setjob_command は変更なし) ---
 
 @app_commands.command(name='work', description='仕事をしてGemを稼ぎます (1時間に1回)')
 async def work_command(interaction: discord.Interaction):
+    # ... (work_command の既存のコードをそのまま配置)
     user_id = str(interaction.user.id)
     
     player = await get_player_data(user_id)
@@ -261,6 +269,7 @@ async def work_command(interaction: discord.Interaction):
 
 @app_commands.command(name='balance', description='現在の所持金、職業、昇進状況を確認します')
 async def balance_command(interaction: discord.Interaction):
+    # ... (balance_command の既存のコードをそのまま配置)
     user_id = str(interaction.user.id)
     
     player = await get_player_data(user_id)
@@ -298,6 +307,7 @@ async def balance_command(interaction: discord.Interaction):
 
 @app_commands.command(name='ping', description='Botの応答速度を確認します')
 async def ping_command(interaction: discord.Interaction):
+    # ... (ping_command の既存のコードをそのまま配置)
     # Botのレイテンシ (秒) からミリ秒に変換
     latency_ms = bot.latency * 1000
     
@@ -315,6 +325,7 @@ async def ping_command(interaction: discord.Interaction):
     job_index='設定したい職業のインデックス (0から開始, 0: 見習い, 4: 部長など)'
 )
 async def setjob_command(interaction: discord.Interaction, target_user: discord.Member, job_index: int):
+    # ... (setjob_command の既存のコードをそのまま配置)
     # 職業インデックスのバリデーション
     if not (0 <= job_index < len(JOB_HIERARCHY)):
         await interaction.response.send_message(
@@ -345,10 +356,8 @@ async def setjob_command(interaction: discord.Interaction, target_user: discord.
         ephemeral=False
     )
 
-
-# --- 実行部分 ---
 if __name__ == "__main__":
-    # Koyebはデフォルトでポート8000を使用します
+    # Procfileで Uvicorn を使用するため、このブロックは Koyebでは実行されません。
+    # ローカルでテストする場合のみ使用されます。
     PORT = int(os.environ.get("PORT", 8000))
-    # Uvicornを使ってFastAPIアプリケーションを起動
     uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT)
