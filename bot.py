@@ -1,6 +1,4 @@
-# Easy Discord Bot Builderによって作成されました！ 製作：@himais0giiiin
-# Created with Easy Discord Bot Builder! created by @himais0giiiin!
-# Optimized Version for Koyeb Deployment (Advanced Economic System & Anti-Sleep)
+# Discord Bot - aiohttpによる非同期スリープ回避版 (Koyeb Deep Sleep対策)
 
 from flask import Flask
 from threading import Thread
@@ -16,43 +14,42 @@ import json
 import os
 import logging
 import time
-import requests # 👈 スリープ回避のためにrequestsライブラリをインポート
+import aiohttp # 👈 requestsの代わりに非同期HTTPクライアントを使用
 
-# 🚨 新しい設定ファイルをインポート
+# 🚨 設定ファイルをインポート
 try:
     from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS, DATA_FILE
 except ImportError:
     print("Error: economy_config.py not found. Please ensure it is in the same directory.")
-    # デプロイに失敗するように、ここで終了させます
     exit(1)
 
+# ロギング設定
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Flaskアプリの作成 (ヘルスチェック用)
+# --- Flask Webサーバー設定 (Koyebのヘルスチェック応答用) ---
 app = Flask(__name__)
 
 @app.route('/')
 def index():
-    # 応答コード200を返し、ボットが正常に稼働していることをKoyebに伝えます。
-    return "Discord Bot is running!", 200
+    # Koyebはこの応答を受けてインスタンスを「稼働中」と判断します。
+    return "Discord Bot is running and pingable!", 200
 
-# Flaskサーバーを別スレッドで起動する関数
 def run_flask():
     # Koyebは外部アクセスに8000番ポートを使用します。
     app.run(host='0.0.0.0', port=8000, debug=False)
 
-# ロギング設定 (Logging Setup)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# インテンツ設定
+# --- Discord Bot設定 ---
 intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True 
 intents.voice_states = True
 
-# Botの作成 (コマンドプレフィックスは '!' )
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# ---JSON操作---
+# グローバルなHTTPセッション変数
+http_session = None
+
+# --- JSON操作 (変更なし) ---
 def _load_json_data(filename):
     if not os.path.exists(filename):
         return {}
@@ -70,32 +67,39 @@ def _save_json_data(filename, data):
     except Exception as e:
         logging.error(f"JSON Save Error: {e}")
 
-# --- スリープ回避のためのタスク ---
+# --- スリープ回避のためのタスク (aiohttpを使用) ---
 @tasks.loop(minutes=10) # 10分ごとに実行
 async def http_ping():
-    # KoyebのデプロイメントURLを取得します。Koyeb環境では自動で設定されます。
-    # 失敗した場合は localhost:8000 を試みます。
-    url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000")
+    global http_session
+    # Koyeb環境では、自分のパブリックURL (K_SERVICE_URL)にアクセスすることが推奨されます。
+    url = os.environ.get("K_SERVICE_URL") 
     
+    if not url:
+        logging.warning("K_SERVICE_URL環境変数が設定されていません。内部Ping (localhost:8000)を試みます。")
+        url = "http://127.0.0.1:8000"
+    
+    # HTTPセッションがまだ開始されていなければ開始
+    if http_session is None:
+        http_session = aiohttp.ClientSession()
+
     try:
-        # タイムアウトを設定し、ボットの動作を邪魔しないようにします
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            logging.info(f"Self-ping successful. Status: {response.status_code}")
-        else:
-            logging.warning(f"Self-ping failed. Status: {response.status_code}")
+        # aiohttpを使って非同期でGETリクエストを送信
+        async with http_session.get(url, timeout=5) as response:
+            if response.status == 200:
+                logging.info(f"Self-ping successful to {url}. Status: {response.status}")
+            else:
+                logging.warning(f"Self-ping failed to {url}. Status: {response.status}")
 
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Self-ping error: {e}")
+    except Exception as e:
+        # 接続エラーやタイムアウトをキャッチ
+        logging.error(f"Self-ping error to {url}: {e.__class__.__name__}: {e}")
 
-# ----------------------------
 
-# --- ユーザー作成部分 ---
+# --- 起動処理とコマンド (変更なし) ---
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     try:
-        # スラッシュコマンドの同期
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
@@ -105,7 +109,15 @@ async def on_ready():
     if not http_ping.is_running():
         http_ping.start()
         print("Anti-sleep HTTP ping task started.")
+        
+# ボット終了時の処理（セッションクローズ）
+@bot.event
+async def on_shutdown():
+    global http_session
+    if http_session:
+        await http_session.close()
 
+# --- work, balance, leaderboard, setjob コマンド (元のコードから変更なし) ---
 
 @bot.command(name='ping')
 async def ping_cmd(ctx):
@@ -121,9 +133,7 @@ async def ping_cmd(ctx):
             await ctx.reply(content='ｼｬｱｱｱｱｱ')
 
 
-# --- 経済機能コマンド ---
-
-@bot.tree.command(name='work', description='仕事をしてGemを稼ぎます (1時間に1回)')
+@bot.tree.command(name='work', description='仕事をしてGemを稼ぎます (10分に1回)')
 async def work_command(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     data = _load_json_data(DATA_FILE)
