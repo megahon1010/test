@@ -1,8 +1,10 @@
-// economy_config.ts
+// economy_config.ts - 経済システムに関する定数
 
-// サーバーの経済システムに関する定数を定義します
-export const CURRENCY_EMOJI = "💎"; // Gemの絵文字
-export const COOLDOWN_SECONDS = 10; // クールダウン時間 (秒) - 今回は10秒に設定されています
+// 通貨の絵文字
+export const CURRENCY_EMOJI = "💎";
+
+// 仕事のクールダウン時間 (秒)
+export const COOLDOWN_SECONDS = 10; // ユーザー設定に合わせて10秒に修正
 
 // 職業の階層と報酬設定
 export const JOB_HIERARCHY = [
@@ -30,4 +32,5 @@ export const VARIATION_DATA = {
         "bonus_multiplier": 0.5, // 基本給の50%をボーナスとして加算
         "message": "{job_name}として働き、{earnings}{emoji}Gemを稼ぎました！さらにボーナスとして{bonus_amount}{emoji}をもらいました！\n合計: **{total_earnings}{emoji}Gem**"
     }
+    // 以前あった 'jackpot' は削除されました
 };
