@@ -1,4 +1,5 @@
 discord.py
-Flask
+fastapi
+uvicorn
 aiohttp
 firebase-admin
