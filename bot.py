@@ -16,13 +16,14 @@ import json
 import os
 import logging
 import time
-import requests # 👈 自己Pingのためにrequestsを追加
+import requests # 👈 スリープ回避のためにrequestsライブラリをインポート
 
 # 🚨 新しい設定ファイルをインポート
 try:
     from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS, DATA_FILE
 except ImportError:
     print("Error: economy_config.py not found. Please ensure it is in the same directory.")
+    # デプロイに失敗するように、ここで終了させます
     exit(1)
 
 
@@ -212,7 +213,7 @@ async def work_command(interaction: discord.Interaction):
         description=response_message + promotion_message,
         color=discord.Color.blue()
     )
-    embed.add_field(name="現在の所持金", value=f"{CURRENCY_EMOJI} {player['gem_balance']}", inline=False)
+    embed.add_field(name="現在の所持金", value=f"{CURRENCY_EMOJI} {player['gem_balance']:,}", inline=False)
     
     await interaction.response.send_message(embed=embed)
 
@@ -242,7 +243,7 @@ async def balance_command(interaction: discord.Interaction):
     if next_job_index < len(JOB_HIERARCHY):
         next_job = JOB_HIERARCHY[next_job_index]
         required_works = next_job['required_works']
-        remaining = required_works - work_count
+        remaining = max(0, required_works - work_count) # マイナスにならないように
         
         next_job_info = (f"次の昇進 ({next_job['name']} {next_job['emoji']}) まで: "
                          f"あと **{remaining}回** の仕事が必要です！")
@@ -254,7 +255,7 @@ async def balance_command(interaction: discord.Interaction):
         title=f"{CURRENCY_EMOJI} {interaction.user.display_name}さんの経済ステータス",
         color=discord.Color.gold()
     )
-    embed.add_field(name="Gem残高", value=f"**{CURRENCY_EMOJI} {balance}**", inline=False)
+    embed.add_field(name="Gem残高", value=f"**{CURRENCY_EMOJI} {balance:,}**", inline=False)
     embed.add_field(name="現在の職業", value=f"**{current_job['name']} {current_job['emoji']}**", inline=True)
     embed.add_field(name="総仕事回数", value=f"**{work_count}回**", inline=True)
     embed.add_field(name="昇進状況", value=next_job_info, inline=False)
