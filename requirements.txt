@@ -1,4 +1,4 @@
 discord.py
-# ボイス機能を使うなら PyNaCl も追加
-# PyNaCl
-Flask  # 追加
+Flask
+aiohttp
+firebase-admin
