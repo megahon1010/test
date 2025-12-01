@@ -125,5 +125,6 @@ if __name__ == "__main__":
     t.start()
     
     # トークンを設定してボットを起動
-    bot.run('')
+    bot.run('DISCORD_TOKEN')
     pass
+
