@@ -1,41 +1,39 @@
-# Discord Bot - aiohttpによる非同期スリープ回避版 (Koyeb Deep Sleep対策)
+# Discord Bot - Firestore永続化版 (データリセット対策 & Koyeb Deep Sleep対策)
 
 from flask import Flask
 from threading import Thread
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from discord import ui
 import random
-import asyncio
-import datetime
-import math
+import time
+import aiohttp 
 import json
 import os
 import logging
-import time
-import aiohttp # 👈 requestsの代わりに非同期HTTPクライアントを使用
-
-# 🚨 設定ファイルをインポート
-try:
-    from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS, DATA_FILE
-except ImportError:
-    print("Error: economy_config.py not found. Please ensure it is in the same directory.")
-    exit(1)
+# 🚨 Firebase関連のインポート
+import firebase_admin 
+from firebase_admin import credentials, firestore
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 🚨 設定ファイルをインポート
+try:
+    from economy_config import JOB_HIERARCHY, VARIATION_DATA, CURRENCY_EMOJI, COOLDOWN_SECONDS
+except ImportError:
+    logging.error("Error: economy_config.py not found. Please ensure it is in the same directory.")
+    exit(1)
 
 # --- Flask Webサーバー設定 (Koyebのヘルスチェック応答用) ---
 app = Flask(__name__)
 
 @app.route('/')
 def index():
-    # Koyebはこの応答を受けてインスタンスを「稼働中」と判断します。
     return "Discord Bot is running and pingable!", 200
 
 def run_flask():
-    # Koyebは外部アクセスに8000番ポートを使用します。
+    # 警告は出ますが、Koyebの動作に必須なのでこのままにします
     app.run(host='0.0.0.0', port=8000, debug=False)
 
 # --- Discord Bot設定 ---
@@ -46,58 +44,106 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# グローバルなHTTPセッション変数
+# グローバル変数
 http_session = None
+db = None # Firestoreクライアント
 
-# --- JSON操作 (変更なし) ---
-def _load_json_data(filename):
-    if not os.path.exists(filename):
-        return {}
+# --- Firestore初期化 ---
+def init_firestore():
+    global db
+    # 🚨 Koyebの環境変数から認証情報を取得
+    firebase_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+    if not firebase_json_str:
+        logging.error("FIREBASE_CREDENTIALS_JSON 環境変数が設定されていません。データは永続化されません。")
+        return False
+        
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        # JSON文字列を解析し、認証情報として使用
+        # Koyebで設定する環境変数の値は、JSONファイルの中身をそのままコピーしてください。
+        cred_json = json.loads(firebase_json_str)
+        cred = credentials.Certificate(cred_json)
+        
+        if not firebase_admin._apps:
+             firebase_admin.initialize_app(cred)
+        
+        db = firestore.client()
+        logging.info("Firebase Firestore initialized successfully. Data is now persistent.")
+        return True
     except Exception as e:
-        logging.error(f"JSON Load Error: {e}")
-        return {}
+        logging.error(f"Failed to initialize Firebase: {e}")
+        return False
 
-def _save_json_data(filename, data):
+# --- Firestore操作 ---
+# ユーザーデータをFirestoreから取得
+async def get_player_data(user_id):
+    """Firestoreからユーザーデータを取得し、存在しない場合は初期値を返す。"""
+    if db is None:
+        return None # DB接続失敗
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+        # 'users' コレクションのユーザーIDドキュメントを参照
+        doc_ref = db.collection('users').document(str(user_id))
+        doc = await bot.loop.run_in_executor(None, doc_ref.get) # 同期処理を非同期で実行
+        
+        if doc.exists:
+            return doc.to_dict()
+        else:
+            # データがない場合は初期値を返す (Firestoreには書き込まない)
+            return {
+                'gem_balance': 0, 
+                'work_count': 0, 
+                'last_work_time': 0, 
+                'job_index': 0 
+            }
     except Exception as e:
-        logging.error(f"JSON Save Error: {e}")
+        logging.error(f"Firestore Get Error for {user_id}: {e}")
+        return None
 
-# --- スリープ回避のためのタスク (aiohttpを使用) ---
-@tasks.loop(minutes=10) # 10分ごとに実行
+# ユーザーデータをFirestoreに保存
+async def set_player_data(user_id, data):
+    """ユーザーデータをFirestoreに保存する。"""
+    if db is None:
+        return False
+    try:
+        doc_ref = db.collection('users').document(str(user_id))
+        await bot.loop.run_in_executor(None, lambda: doc_ref.set(data)) # 同期処理を非同期で実行
+        return True
+    except Exception as e:
+        logging.error(f"Firestore Set Error for {user_id}: {e}")
+        return False
+
+
+# --- スリープ回避のためのタスク (変更なし) ---
+@tasks.loop(minutes=10)
 async def http_ping():
     global http_session
-    # Koyeb環境では、自分のパブリックURL (K_SERVICE_URL)にアクセスすることが推奨されます。
-    url = os.environ.get("K_SERVICE_URL") 
+    # K_SERVICE_URLが設定されていない場合は内部Ping（警告は出ます）
+    url = os.environ.get("K_SERVICE_URL", "http://127.0.0.1:8000") 
     
-    if not url:
+    if "127.0.0.1" in url:
         logging.warning("K_SERVICE_URL環境変数が設定されていません。内部Ping (localhost:8000)を試みます。")
-        url = "http://127.0.0.1:8000"
     
-    # HTTPセッションがまだ開始されていなければ開始
     if http_session is None:
         http_session = aiohttp.ClientSession()
 
     try:
-        # aiohttpを使って非同期でGETリクエストを送信
         async with http_session.get(url, timeout=5) as response:
             if response.status == 200:
                 logging.info(f"Self-ping successful to {url}. Status: {response.status}")
             else:
                 logging.warning(f"Self-ping failed to {url}. Status: {response.status}")
-
     except Exception as e:
-        # 接続エラーやタイムアウトをキャッチ
+        # ネットワークエラーやDNSエラーなど
         logging.error(f"Self-ping error to {url}: {e.__class__.__name__}: {e}")
 
 
-# --- 起動処理とコマンド (変更なし) ---
+# --- 起動処理とコマンド ---
 @bot.event
 async def on_ready():
+    # Firestoreの初期化を試行
+    if not init_firestore():
+        # Firestore初期化に失敗してもBotは起動させるが、データは永続化されない
+        print("WARNING: Firestoreの初期化に失敗しました。データはリセットされます。")
+        
     print(f'Logged in as {bot.user}')
     try:
         synced = await bot.tree.sync()
@@ -105,46 +151,20 @@ async def on_ready():
     except Exception as e:
         print(e)
         
-    # 🚨 ここでスリープ回避タスクを開始します
     if not http_ping.is_running():
         http_ping.start()
         print("Anti-sleep HTTP ping task started.")
         
-# ボット終了時の処理（セッションクローズ）
-@bot.event
-async def on_shutdown():
-    global http_session
-    if http_session:
-        await http_session.close()
 
-# --- work, balance, leaderboard, setjob コマンド (元のコードから変更なし) ---
-
-@bot.command(name='ping')
-async def ping_cmd(ctx):
-    if 'ctx' in locals():
-        if isinstance(ctx, discord.Interaction):
-            if ctx.response.is_done():
-                await ctx.followup.send(content='ｼｬｱｱｱｱｱ', ephemeral=False)
-            else:
-                await ctx.response.send_message(content='ｼｬｱｱｱｱｱ', ephemeral=False)
-        elif isinstance(ctx, commands.Context):
-            await ctx.send(content='ｼｬｱｱｱｱｱ')
-        elif isinstance(ctx, discord.Message):
-            await ctx.reply(content='ｼｬｱｱｱｱｱ')
-
-
-@bot.tree.command(name='work', description='仕事をしてGemを稼ぎます (10分に1回)')
+@bot.tree.command(name='work', description='仕事をしてGemを稼ぎます (1時間に1回)')
 async def work_command(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
-    data = _load_json_data(DATA_FILE)
     
-    # プレイヤーデータの初期化 (gem_balance, work_count, last_work_time, job_index)
-    player = data.setdefault(user_id, {
-        'gem_balance': 0, 
-        'work_count': 0, 
-        'last_work_time': 0, 
-        'job_index': 0 # 初期職業は JOB_HIERARCHY[0]
-    })
+    # データをFirestoreから取得
+    player = await get_player_data(user_id)
+    if player is None:
+        await interaction.response.send_message("エラー: データベースに接続できませんでした。FIREBASE_CREDENTIALS_JSONを確認してください。", ephemeral=True)
+        return
 
     # クールダウンチェック
     last_time = player.get('last_work_time', 0)
@@ -166,34 +186,22 @@ async def work_command(interaction: discord.Interaction):
     low_pay, high_pay = current_job['pay']
     job_key = f"{current_job['name']} {current_job['emoji']}"
 
-    # 収益の変動をランダムで決定 (3種類)
+    # 収益の計算
     variation_key = random.choice(list(VARIATION_DATA.keys()))
     variation = VARIATION_DATA[variation_key]
-
-    # 1. 基本となる稼ぎをランダムに決定
     base_earnings = random.randint(low_pay, high_pay)
-    
-    # 2. 変動倍率を適用して総稼ぎを計算
     total_earnings = int(base_earnings * variation["multiplier"])
     
-    # 3. ボーナス時の処理
     if variation_key == 'bonus':
         bonus_amount = int(base_earnings * variation["bonus_multiplier"])
         total_earnings += bonus_amount
-        
         response_message = variation["message"].format(
-            job_name=current_job['name'],
-            earnings=base_earnings,
-            bonus_amount=bonus_amount,
-            total_earnings=total_earnings,
-            emoji=CURRENCY_EMOJI
+            job_name=current_job['name'], earnings=base_earnings, bonus_amount=bonus_amount,
+            total_earnings=total_earnings, emoji=CURRENCY_EMOJI
         )
     else:
-        # ボーナス以外のメッセージの整形
         response_message = variation["message"].format(
-            job_name=current_job['name'],
-            earnings=total_earnings,
-            emoji=CURRENCY_EMOJI
+            job_name=current_job['name'], earnings=total_earnings, emoji=CURRENCY_EMOJI
         )
         
     # データの更新
@@ -207,15 +215,12 @@ async def work_command(interaction: discord.Interaction):
     
     if next_job_index < len(JOB_HIERARCHY):
         next_job = JOB_HIERARCHY[next_job_index]
-        
-        # 昇進条件達成チェック
         if player['work_count'] >= next_job['required_works']:
-            player['job_index'] = next_job_index # 職業インデックスを更新
-            
-            # 昇進メッセージを生成
+            player['job_index'] = next_job_index
             promotion_message = f"\n\n**🎉 昇進おめでとう！**\nあなたは **{next_job['name']} {next_job['emoji']}** に昇進しました！"
     
-    _save_json_data(DATA_FILE, data)
+    # データをFirestoreに保存
+    await set_player_data(user_id, player)
 
     # 応答メッセージ
     embed = discord.Embed(
@@ -231,21 +236,15 @@ async def work_command(interaction: discord.Interaction):
 @bot.tree.command(name='balance', description='現在の所持金、職業、昇進状況を確認します')
 async def balance_command(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
-    data = _load_json_data(DATA_FILE)
     
-    # データがない場合は初期値を設定
-    player = data.setdefault(user_id, {
-        'gem_balance': 0, 
-        'work_count': 0, 
-        'last_work_time': 0, 
-        'job_index': 0
-    })
-    _save_json_data(DATA_FILE, data)
-
+    player = await get_player_data(user_id)
+    if player is None:
+        await interaction.response.send_message("エラー: データベースに接続できませんでした。FIREBASE_CREDENTIALS_JSONを確認してください。", ephemeral=True)
+        return
+    
     balance = player['gem_balance']
     work_count = player['work_count']
     job_index = player['job_index']
-    
     current_job = JOB_HIERARCHY[job_index]
     
     # 次の職業情報を取得
@@ -253,13 +252,11 @@ async def balance_command(interaction: discord.Interaction):
     if next_job_index < len(JOB_HIERARCHY):
         next_job = JOB_HIERARCHY[next_job_index]
         required_works = next_job['required_works']
-        remaining = max(0, required_works - work_count) # マイナスにならないように
-        
+        remaining = max(0, required_works - work_count)
         next_job_info = (f"次の昇進 ({next_job['name']} {next_job['emoji']}) まで: "
                          f"あと **{remaining}回** の仕事が必要です！")
     else:
         next_job_info = "あなたは最高の職業に就いています！"
-
 
     embed = discord.Embed(
         title=f"{CURRENCY_EMOJI} {interaction.user.display_name}さんの経済ステータス",
@@ -272,99 +269,6 @@ async def balance_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-
-@bot.tree.command(name='leaderboard', description='Gem所持金のランキングTOP10を表示します')
-async def leaderboard_command(interaction: discord.Interaction):
-    data = _load_json_data(DATA_FILE)
-    
-    # Gem残高に基づいてユーザーデータをソート
-    leaderboard = []
-    for user_id, user_data in data.items():
-        try:
-            # ユーザーIDからdiscord.Memberオブジェクトを取得
-            user = bot.get_user(int(user_id))
-            if user:
-                leaderboard.append({
-                    'name': user.display_name,
-                    'balance': user_data.get('gem_balance', 0),
-                    'job_index': user_data.get('job_index', 0)
-                })
-        except ValueError:
-            continue # 無効なユーザーIDはスキップ
-            
-    # Gem残高で降順ソート
-    leaderboard.sort(key=lambda x: x['balance'], reverse=True)
-
-    embed = discord.Embed(
-        title=f"👑 Gem所持金ランキング TOP {min(10, len(leaderboard))}",
-        color=discord.Color.red()
-    )
-    
-    if not leaderboard:
-        embed.description = "まだ誰も働いていません！ /work コマンドを使って稼ぎましょう！"
-    else:
-        rank_text = []
-        for i, entry in enumerate(leaderboard[:10]):
-            job_name = JOB_HIERARCHY[entry['job_index']]['name']
-            # 見やすくするために、3桁区切りのカンマを追加
-            balance_formatted = f"{entry['balance']:,}" 
-            rank_text.append(
-                f"**#{i+1}** {entry['name']} ({job_name})\n"
-                f"└─ {CURRENCY_EMOJI} **{balance_formatted}**"
-            )
-        embed.description = "\n".join(rank_text)
-
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name='setjob', description='[管理者専用] ユーザーの職業を手動で設定します')
-@app_commands.describe(member="職業を設定するユーザー", job_rank="設定したい職業のランク (0, 1, 2, ...)")
-@commands.has_permissions(administrator=True) # 管理者権限を持つユーザーのみ実行可能
-async def setjob_command(interaction: discord.Interaction, member: discord.Member, job_rank: int):
-    # 権限チェック
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("このコマンドを実行するには管理者権限が必要です。", ephemeral=True)
-        return
-
-    if not 0 <= job_rank < len(JOB_HIERARCHY):
-        await interaction.response.send_message(
-            f"指定された職業ランクは無効です。有効なランクは 0 から {len(JOB_HIERARCHY) - 1} です。", 
-            ephemeral=True
-        )
-        return
-
-    user_id = str(member.id)
-    data = _load_json_data(DATA_FILE)
-    
-    player = data.setdefault(user_id, {
-        'gem_balance': 0, 
-        'work_count': 0, 
-        'last_work_time': 0, 
-        'job_index': 0
-    })
-    
-    old_job = JOB_HIERARCHY[player['job_index']]
-    new_job = JOB_HIERARCHY[job_rank]
-    
-    # 職業インデックスを更新
-    player['job_index'] = job_rank
-    
-    _save_json_data(DATA_FILE, data)
-    
-    await interaction.response.send_message(
-        f"✅ {member.display_name}さんの職業を**{old_job['name']}**から**{new_job['name']} {new_job['emoji']}**に変更しました。", 
-        ephemeral=False
-    )
-
-# /setjobが管理者権限を持っていない場合に表示するエラーメッセージ
-@setjob_command.error
-async def setjob_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("エラー: あなたにはこのコマンドを実行するための管理者権限がありません。", ephemeral=True)
-
-
-# --------------------------
-
 if __name__ == "__main__":
     from threading import Thread
     
@@ -376,10 +280,6 @@ if __name__ == "__main__":
     TOKEN = os.environ.get('DISCORD_TOKEN')
     
     if TOKEN:
-        # トークンが取得できたら、それを使ってボットを起動
         bot.run(TOKEN)
     else:
-        # トークンが設定されていない場合はエラーメッセージを出力
-        print("Error: DISCORD_TOKEN 環境変数が設定されていません。Koyebの設定を確認してください。")
-    
-    pass
+        logging.error("Error: DISCORD_TOKEN 環境変数が設定されていません。")
