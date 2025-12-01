@@ -1,6 +1,21 @@
 # Easy Discord Bot Builderによって作成されました！ 製作：@himais0giiiin
 # Created with Easy Discord Bot Builder! created by @himais0giiiin!
 # Optimized Version
+# (既存のコードの上部/import群の下に追記)
+from flask import Flask
+from threading import Thread
+
+# Flaskアプリの作成 (ヘルスチェック用)
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    # Koyebがボットの稼働を確認するための応答
+    return "Discord Bot is running!", 200
+
+# Flaskサーバーを別スレッドで起動する関数
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
 
 import discord
 from discord import app_commands
@@ -104,6 +119,11 @@ async def ping_cmd(ctx):
 # --------------------------
 
 if __name__ == "__main__":
-    # Token check
-    bot.run('') # 実行時はここにTokenを入れてください!
+    # 🚨 サーバーとボットを同時に起動する
+    # サーバーを別スレッドで起動
+    t = Thread(target=run_flask)
+    t.start()
+    
+    # トークンを設定してボットを起動
+    bot.run('')
     pass
